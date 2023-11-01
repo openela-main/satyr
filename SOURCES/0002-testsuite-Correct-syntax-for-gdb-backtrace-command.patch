@@ -1,0 +1,34 @@
+From 91e3bc23a654e3daf1bf6546b06b9de7d00dbd59 Mon Sep 17 00:00:00 2001
+From: Martin Kutlak <mkutlak@redhat.com>
+Date: Fri, 29 Jun 2018 10:52:48 +0200
+Subject: [PATCH] testsuite: Correct syntax for gdb backtrace command
+
+The test failed on rawhide (gdb v8.1.50) with error message:
+"A syntax error in expression, near `full'."
+
+According to the GDB documentation the correct syntax for backtrace
+command is `backtrace [full] n`.
+
+- https://sourceware.org/gdb/onlinedocs/gdb/Backtrace.html
+
+Signed-off-by: Martin Kutlak <mkutlak@redhat.com>
+---
+ tests/core_stacktrace.at | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/core_stacktrace.at b/tests/core_stacktrace.at
+index 7f6198e..13678c8 100644
+--- a/tests/core_stacktrace.at
++++ b/tests/core_stacktrace.at
+@@ -281,7 +281,7 @@ get_backtrace(const char *core_file, const char *executable)
+   args[i++] = (char*)"-ex";
+   args[i++] = sr_asprintf("core-file %s", core_file);
+   args[i++] = (char*)"-ex";
+-  args[i++] = (char*)"thread apply all -ascending backtrace 1024 full";
++  args[i++] = (char*)"thread apply all -ascending backtrace full 1024";
+   args[i++] = (char*)"-ex";
+   args[i++] = (char*)"info sharedlib";
+   args[i++] = (char*)"-ex";
+-- 
+2.17.1
+
