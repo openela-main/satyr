@@ -1,0 +1,262 @@
+From 0a71b956f2a778860cc35c83b051272f3f80cefc Mon Sep 17 00:00:00 2001
+From: Matej Marusak <mmarusak@redhat.com>
+Date: Thu, 5 Apr 2018 11:06:43 +0200
+Subject: [PATCH] Anonymize paths in frames
+
+Fixes abrt/libreport#523
+
+Signed-off-by: Matej Marusak <mmarusak@redhat.com>
+---
+ include/utils.h                    |  3 +++
+ lib/java_frame.c                   |  6 ++++++
+ lib/js_frame.c                     |  1 +
+ lib/normalize.c                    |  9 +++++++++
+ lib/python_frame.c                 |  2 ++
+ lib/ruby_frame.c                   |  2 ++
+ lib/utils.c                        | 23 +++++++++++++++++++++++
+ tests/java_frame.at                | 12 ++++++++++++
+ tests/js_frame.at                  |  7 +++++++
+ tests/python/python.py             |  8 ++++----
+ tests/python_stacktraces/python-01 |  2 +-
+ tests/ruby_frame.at                |  2 +-
+ 12 files changed, 71 insertions(+), 6 deletions(-)
+
+diff --git a/include/utils.h b/include/utils.h
+index 1c7984b..b36bc2c 100644
+--- a/include/utils.h
++++ b/include/utils.h
+@@ -406,6 +406,9 @@ sr_parse_os_release(const char *input,
+                     void (*callback)(char*, char*, void*),
+                     void *data);
+ 
++char*
++anonymize_path(char *file_name);
++
+ /**
+  * Demangles C++ symbol.
+  * @returns
+diff --git a/lib/java_frame.c b/lib/java_frame.c
+index 8724b64..ea407bf 100644
+--- a/lib/java_frame.c
++++ b/lib/java_frame.c
+@@ -468,7 +468,10 @@ const char *sr_java_frame_parse_frame_url(struct sr_java_frame *frame, const cha
+         sr_location_add(location, 0, sr_skip_char_cspan(&cursor, path_stop));
+ 
+         if (mark != cursor)
++        {
+             frame->class_path = sr_strndup(mark, cursor - mark);
++            frame->class_path = anonymize_path(frame->class_path);
++        }
+     }
+ 
+     if (*cursor != ']' && *cursor != '\n')
+@@ -522,8 +525,11 @@ sr_java_frame_parse(const char **input,
+             if (sr_java_frame_parse_is_native_method(mark))
+                 frame->is_native = true;
+             else if (!sr_java_frame_parse_is_unknown_source(mark))
++            {
+                 /* DO NOT set file_name if input says that source isn't known */
+                 frame->file_name = sr_strndup(mark, cursor - mark);
++                frame->file_name = anonymize_path(frame->file_name);
++            }
+         }
+ 
+         if (*cursor == ':')
+diff --git a/lib/js_frame.c b/lib/js_frame.c
+index cb29bd6..e9b6514 100644
+--- a/lib/js_frame.c
++++ b/lib/js_frame.c
+@@ -344,6 +344,7 @@ sr_js_frame_parse_v8(const char **input,
+      * ^^^^^^^^^^^^^^^^^
+      */
+     frame->file_name = sr_strndup(local_input, token - local_input);
++    frame->file_name = anonymize_path(frame->file_name);
+ 
+     location->column += sr_skip_char_cspan(&local_input, "\n");
+ 
+diff --git a/lib/normalize.c b/lib/normalize.c
+index d23e8f5..3973b3b 100644
+--- a/lib/normalize.c
++++ b/lib/normalize.c
+@@ -630,6 +630,15 @@ sr_normalize_core_thread(struct sr_core_thread *thread)
+         frame = next_frame;
+     }
+ 
++    /* Anonymize file_name if contains /home/<user>/...
++     */
++    frame = thread->frames;
++    while (frame)
++    {
++        frame->file_name = anonymize_path(frame->file_name);
++        frame = frame->next;
++    }
++
+     /* If the first frame has address 0x0000 and its name is '??', it
+      * is a dereferenced null, and we remove it. This frame is not
+      * really invalid, but it affects stacktrace quality rating. See
+diff --git a/lib/python_frame.c b/lib/python_frame.c
+index 9287f3d..8453016 100644
+--- a/lib/python_frame.c
++++ b/lib/python_frame.c
+@@ -237,6 +237,8 @@ sr_python_frame_parse(const char **input,
+         frame->file_name = inside;
+     }
+ 
++    frame->file_name = anonymize_path(frame->file_name);
++
+     location->column += strlen(frame->file_name);
+ 
+     if (0 == sr_skip_string(&local_input, "\", line "))
+diff --git a/lib/ruby_frame.c b/lib/ruby_frame.c
+index 4926c63..76f17fe 100644
+--- a/lib/ruby_frame.c
++++ b/lib/ruby_frame.c
+@@ -258,6 +258,8 @@ sr_ruby_frame_parse(const char **input,
+     /* Everything before the colon is the file name. */
+     *p = '\0';
+     frame->file_name = filename_lineno_in;
++    frame->file_name = anonymize_path(frame->file_name);
++
+     filename_lineno_in = NULL;
+ 
+     if(!sr_skip_char(&local_input, '`'))
+diff --git a/lib/utils.c b/lib/utils.c
+index 5bbbd19..415929c 100644
+--- a/lib/utils.c
++++ b/lib/utils.c
+@@ -31,6 +31,9 @@
+ #include <fcntl.h>
+ #include <ctype.h>
+ 
++#define ANONYMIZED_PATH "/home/anonymized"
++
++
+ /* The prototype is in C++ header cxxabi.h, let's just copypaste it here
+  * instead of fiddling with include directories */
+ char* __cxa_demangle(const char* mangled_name, char* output_buffer,
+@@ -849,3 +852,23 @@ sr_demangle_symbol(const char *sym)
+ 
+     return demangled;
+ }
++
++char*
++anonymize_path(char *orig_path)
++{
++    if (!orig_path)
++        return orig_path;
++    char* new_path = orig_path;
++    if (strncmp(orig_path, "/home/", strlen("/home/")) == 0)
++    {
++        new_path = strchr(new_path + strlen("/home/"), '/');
++        if (new_path)
++        {
++            // Join /home/anonymized/ and ^
++            new_path = sr_asprintf("%s%s", ANONYMIZED_PATH, new_path);
++            free(orig_path);
++            return new_path;
++        }
++    }
++    return orig_path;
++}
+diff --git a/tests/java_frame.at b/tests/java_frame.at
+index 00738be..2c6a7de 100644
+--- a/tests/java_frame.at
++++ b/tests/java_frame.at
+@@ -459,6 +459,18 @@ main(void)
+   location.column = 0;
+   check(c, &frame, c + strlen(c), &location);
+ 
++  /** next frame **/
++  sr_java_frame_init(&frame);
++  frame.name = sr_strdup("com.redhat.abrt.duke.nuke");
++  frame.file_name = sr_strdup("duke.java");
++  frame.class_path = sr_strdup("/home/anonymized/lib/java/foo.class");
++
++  c = "    at com.redhat.abrt.duke.nuke(duke.java:-1) [file:/home/user/lib/java/foo.class]\n";
++  sr_location_init(&location);
++  location.line = 2;
++  location.column = 0;
++  check(c, &frame, c + strlen(c), &location);
++
+   /** next frame **/
+   sr_java_frame_init(&frame);
+   frame.name = sr_strdup("com.redhat.abrt.duke.nuke");
+diff --git a/tests/js_frame.at b/tests/js_frame.at
+index d17dd69..a3cc5d5 100644
+--- a/tests/js_frame.at
++++ b/tests/js_frame.at
+@@ -102,6 +102,13 @@ main(void)
+                 33,
+                 63);
+ 
++    check_valid("at    ContextifyScript.Script.runInThisContext    (/home/user/vm.js:25:33)",
++                "ContextifyScript.Script.runInThisContext",
++                "/home/anonymized/vm.js",
++                25,
++                33,
++                74);
++
+     check_valid("at    ContextifyScript.Script.runInThisContext    (vm.js:25:33)  ",
+                 "ContextifyScript.Script.runInThisContext",
+                 "vm.js",
+diff --git a/tests/python/python.py b/tests/python/python.py
+index 9044200..77a9e59 100755
+--- a/tests/python/python.py
++++ b/tests/python/python.py
+@@ -6,7 +6,7 @@ from test_helpers import *
+ path = '../python_stacktraces/python-01'
+ contents = load_input_contents(path)
+ frames_expected = 11
+-expected_short_text = '''#1 _getPackage in /usr/share/PackageKit/helpers/yum/yumBackend.py:2534
++expected_short_text = '''#1 _getPackage in /home/anonymized/PackageKit/helpers/yum/yumBackend.py:2534
+ #2 updateProgress in /usr/share/PackageKit/helpers/yum/yumBackend.py:2593
+ #3 _do_start in /usr/share/PackageKit/helpers/yum/yumBackend.py:2551
+ #4 start in /usr/lib/python2.6/site-packages/urlgrabber/progress.py:129
+@@ -76,16 +76,16 @@ class TestPythonStacktrace(BindingsTestCase):
+         self.assertEqual(self.trace.to_short_text(6), expected_short_text)
+ 
+     def test_bthash(self):
+-        self.assertEqual(self.trace.get_bthash(), 'fa0a7ff4b65f18661a6ce102eb787ff0d77ff12f')
++        self.assertEqual(self.trace.get_bthash(), 'eabeeae89433bb3b3d9eb8190659dcf057ab3cd1')
+ 
+     def test_duphash(self):
+         expected_plain = '''Thread
+-/usr/share/PackageKit/helpers/yum/yumBackend.py:2534
++/home/anonymized/PackageKit/helpers/yum/yumBackend.py:2534
+ /usr/share/PackageKit/helpers/yum/yumBackend.py:2593
+ /usr/share/PackageKit/helpers/yum/yumBackend.py:2551
+ '''
+         self.assertEqual(self.trace.get_duphash(flags=satyr.DUPHASH_NOHASH, frames=3), expected_plain)
+-        self.assertEqual(self.trace.get_duphash(), '2c8e509a33966a08df1dd8b2348e850d1bc5b776')
++        self.assertEqual(self.trace.get_duphash(), '8c8273cddf94e10fc0349284afcff8970056d9e5')
+ 
+     def test_crash_thread(self):
+         self.assertTrue(self.trace.crash_thread is self.trace)
+diff --git a/tests/python_stacktraces/python-01 b/tests/python_stacktraces/python-01
+index 58abbfc..ae5e72c 100644
+--- a/tests/python_stacktraces/python-01
++++ b/tests/python_stacktraces/python-01
+@@ -19,6 +19,6 @@ Traceback (most recent call last):
+     self.updateProgress(name, 0.0, "", "")
+   File "/usr/share/PackageKit/helpers/yum/yumBackend.py", line 2593, in updateProgress
+     pkg = self._getPackage(name)
+-  File "/usr/share/PackageKit/helpers/yum/yumBackend.py", line 2534, in _getPackage
++  File "/home/user/PackageKit/helpers/yum/yumBackend.py", line 2534, in _getPackage
+     sections = name.rsplit('-', 2)
+ AttributeError: 'NoneType' object has no attribute 'rsplit'
+diff --git a/tests/ruby_frame.at b/tests/ruby_frame.at
+index 1b1b9d0..cef5603 100644
+--- a/tests/ruby_frame.at
++++ b/tests/ruby_frame.at
+@@ -38,7 +38,7 @@ main(void)
+         "/usr/share/ruby/vendor_ruby/will_crash.rb", 13, "func", false, 2, 1);
+ 
+   check("/home/u/work/will:crash/will_crash.rb:30:in `block in <class:WillClass>'",
+-        "/home/u/work/will:crash/will_crash.rb", 30, "class:WillClass", true, 1, 0);
++        "/home/anonymized/work/will:crash/will_crash.rb", 30, "class:WillClass", true, 1, 0);
+ 
+   check("./will_ruby_raise:8:in `<main>'",
+         "./will_ruby_raise", 8, "main", true, 0, 0);
+-- 
+2.17.1
+
